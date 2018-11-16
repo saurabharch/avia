@@ -61,6 +61,9 @@ defmodule Snitch.Core.Mixfile do
       # state machine
       {:beepbop, github: "oyeb/beepbop", branch: "develop"},
 
+      #time
+      {:timex, "~> 3.1"},
+
       # auth
       {:comeonin, "~> 4.1.1"},
       {:argon2_elixir, "~> 1.2"},

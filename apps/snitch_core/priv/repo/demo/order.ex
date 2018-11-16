@@ -1,9 +1,11 @@
 defmodule Snitch.Demo.Order do
 
+  use Timex
+
   import Snitch.Tools.Helper.Order, only: [line_items_with_price: 2]
 
   alias Ecto.DateTime
-  alias Snitch.Data.Schema.{LineItem, Order, ShippingCategory, User, Product, Taxon}
+  alias Snitch.Data.Schema.{LineItem, Order, ShippingCategory, StockLocation, User, Package, PackageItem, Product, Taxon}
   alias Snitch.Core.Tools.MultiTenancy.Repo
 
   require Logger
@@ -14,8 +16,8 @@ defmodule Snitch.Demo.Order do
     user_id: nil,
     billing_address: nil,
     shipping_address: nil,
-    inserted_at: DateTime.utc(),
-    updated_at: DateTime.utc()
+    inserted_at: Timex.now,
+    updated_at: Timex.now
   }
 
   defp build_orders(start_time) do
@@ -23,9 +25,9 @@ defmodule Snitch.Demo.Order do
     [user | _] = Repo.all(User)
 
     digest = [
-      %{quantity: [5, 5, 1, 0, 0, 0, 0], user_id: user.id, state: :cart},
-      %{quantity: [0, 0, 0, 0, 0, 100], user_id: user.id, state: :cart},
-      %{quantity: [5, 0, 8, 12, 0, 0, 0], user_id: user.id, state: :cart}
+      %{quantity: [5, 5, 1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1], user_id: user.id, state: :confirmed},
+      %{quantity: [0, 0, 0, 0, 0, 100], user_id: user.id, state: :confirmed},
+      %{quantity: [5, 0, 8, 12, 0, 0, 0], user_id: user.id, state: :confirmed}
     ]
 
     make_orders(digest, variants, start_time)
@@ -33,23 +35,23 @@ defmodule Snitch.Demo.Order do
   end
 
   def seeds do
+    Repo.delete_all(Package)
     Repo.delete_all(Order)
-    end_time = Ecto.DateTime.utc()
-    start_time = %{end_time | day: end_time.day - 25}
+    end_time = Timex.now
+    start_time =  Timex.shift(end_time, months: -1)
     seed_orders(start_time)
   end
 
   def seed_orders(start_time) do
-    end_time = Ecto.DateTime.utc()
+    end_time = Timex.now
 
-    case  DateTime.compare(start_time, end_time) do
-      :lt  ->
+    case Timex.before?(start_time, end_time) do
+      true  ->
         seed_orders!(start_time)
-        # start_time = %{start_time | day: start_time.day + 1}
-        # seed_orders(start_time)
-      _ ->
+      false ->
         nil
     end
+
   end
 
   def seed_orders!(start_time) do
@@ -64,7 +66,28 @@ defmodule Snitch.Demo.Order do
         returning: true
       )
     Logger.info("Inserted #{count} orders.")
-
+    packages =
+      order_structs
+        |> Enum.map(fn order ->
+          %{
+            number: Nanoid.generate(),
+            order_id: order.id,
+            state: "pending",
+            origin_id: Enum.random(Repo.all(StockLocation)).id,
+            shipping_category_id: Enum.random(Repo.all(ShippingCategory)).id,
+            inserted_at: start_time,
+            updated_at: start_time
+          }
+        end)
+    {count, package_structs} =
+      Repo.insert_all(
+        Package,
+        packages,
+        on_conflict: :nothing,
+        conflict_target: [:number],
+        returning: true
+      )
+    Logger.info("Created #{count} packages.")
     line_items =
       order_structs
       |> Stream.zip(line_items)
@@ -73,9 +96,36 @@ defmodule Snitch.Demo.Order do
       end)
       |> List.flatten()
 
-    {count, _} = Repo.insert_all(LineItem, line_items)
+    {count, line_item_structs} = Repo.insert_all(LineItem, line_items, returning: true)
+
     Logger.info("Inserted #{count} line-items.")
-    start_time = %{start_time | day: start_time.day + 1}
+    package_items =
+      line_item_structs
+        |> Repo.preload([order: :packages])
+        |> Enum.map(fn item ->
+          package = item.order.packages |> List.first()
+          %{
+            number: Nanoid.generate(),
+            quantity: item.quantity,
+            package_id: package.id,
+            state: "pending",
+            backordered?: true,
+            product_id: item.product_id,
+            line_item_id: item.id,
+            inserted_at: start_time,
+            updated_at: start_time
+          }
+        end)
+    {count, package_item_structs} =
+    Repo.insert_all(
+      PackageItem,
+      package_items,
+      on_conflict: :nothing,
+      conflict_target: [:number],
+      returning: true
+    )
+    Logger.info("Created #{count} package_items.")
+    start_time = Timex.shift(start_time, days: 1)
     seed_orders(start_time)
   end
 
@@ -85,7 +135,6 @@ defmodule Snitch.Demo.Order do
     |> Enum.map(fn {manifest, index} ->
       number = "#{Nanoid.generate()}-#{index}"
       line_items = line_items_with_price(variants, manifest.quantity)
-
       line_items = Enum.map(line_items, fn(line_item) ->
         line_item
         |> Map.put(:inserted_at, start_time)
